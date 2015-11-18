@@ -193,6 +193,7 @@ bool BatteryMonitor::update(void) {
     props.batteryHealth = BATTERY_HEALTH_UNKNOWN;
     props.dockBatteryStatus = BATTERY_STATUS_UNKNOWN;
     props.dockBatteryHealth = BATTERY_HEALTH_UNKNOWN;
+    props.maxChargingCurrent = 0;
 
     if (!mHealthdConfig->batteryPresentPath.isEmpty())
         props.batteryPresent = getBooleanField(mHealthdConfig->batteryPresentPath);
@@ -297,6 +298,15 @@ bool BatteryMonitor::update(void) {
                                 KLOG_WARNING(LOG_TAG, "%s: Unknown power supply type\n",
                                              name);
                             }
+                            path.clear();
+                            path.appendFormat("%s/%s/current_max", POWER_SUPPLY_SYSFS_PATH,
+                                           name);
+                            if (access(path.string(), R_OK) == 0) {
+                                int maxChargingCurrent = getIntField(path);
+                                if (props.maxChargingCurrent < maxChargingCurrent) {
+                                       props.maxChargingCurrent = maxChargingCurrent;
+                                }
+                           }
                         }
                     }
                 }
@@ -353,7 +363,7 @@ bool BatteryMonitor::update(void) {
             snprintf(dmesglinedock, sizeof(dmesglinedock),
                  "dock-battery none");
         }
-
+        
         size_t len = strlen(dmesgline);
         snprintf(dmesgline + len, sizeof(dmesgline) - len, " chg=%s%s%s",
                  props.chargerAcOnline ? "a" : "",
@@ -516,9 +526,9 @@ void BatteryMonitor::dumpState(int fd) {
     int v;
     char vs[128];
 
-    snprintf(vs, sizeof(vs), "ac: %d usb: %d wireless: %d dock-ac: %d\n",
+    snprintf(vs, sizeof(vs), "ac: %d usb: %d wireless: %d dock-ac: %d current_max: %d\n",
              props.chargerAcOnline, props.chargerUsbOnline,
-             props.chargerWirelessOnline, props.chargerDockAcOnline);
+             props.chargerWirelessOnline, props.chargerDockAcOnline, props.maxChargingCurrent);
     write(fd, vs, strlen(vs));
     snprintf(vs, sizeof(vs), "status: %d health: %d present: %d\n",
              props.batteryStatus, props.batteryHealth, props.batteryPresent);
