@@ -26,7 +26,7 @@ LOCAL_SRC_FILES:= \
     parser.cpp \
     util.cpp \
 
-LOCAL_STATIC_LIBRARIES := libbase
+LOCAL_STATIC_LIBRARIES := libbase libselinux
 LOCAL_MODULE := libinit
 LOCAL_CLANG := $(init_clang)
 include $(BUILD_STATIC_LIBRARY)
