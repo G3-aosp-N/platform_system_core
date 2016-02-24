@@ -20,8 +20,9 @@ test_src_files := \
 test_target_only_src_files := \
     MemsetTest.cpp \
     PropertiesTest.cpp \
+    trace-dev_test.cpp \
 
-test_libraries := libcutils liblog
+test_libraries := libcutils liblog libbase
 
 
 #
