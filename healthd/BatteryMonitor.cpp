@@ -388,14 +388,6 @@ bool BatteryMonitor::update(void) {
                  "battery none");
         }
 
-        len = strlen(dmesgline);
-        snprintf(dmesgline + len, sizeof(dmesgline) - len, " chg=%s%s%s",
-                 props.chargerAcOnline ? "a" : "",
-                 props.chargerUsbOnline ? "u" : "",
-                 props.chargerWirelessOnline ? "w" : "");
-
-        KLOG_WARNING(LOG_TAG, "%s\n", dmesgline);
-=======
         if (props.dockBatteryPresent) {
             snprintf(dmesglinedock, sizeof(dmesglinedock),
                  "dock-battery [l=%d v=%d t=%s%d.%d h=%d st=%d]",
@@ -417,12 +409,14 @@ bool BatteryMonitor::update(void) {
                  "dock-battery none");
         }
 
-        KLOG_WARNING(LOG_TAG, "%s %s chg=%s%s%s%s\n", dmesgline, dmesglinedock,
-                     props.chargerAcOnline ? "a" : "",
-                     props.chargerUsbOnline ? "u" : "",
-                     props.chargerWirelessOnline ? "w" : "",
-                     props.chargerDockAcOnline ? "d" : "");
->>>>>>> healthd: dock battery
+
+        len = strlen(dmesgline);
+        snprintf(dmesgline + len, sizeof(dmesgline) - len, " chg=%s%s%s",
+                 props.chargerAcOnline ? "a" : "",
+                 props.chargerUsbOnline ? "u" : "",
+                 props.chargerWirelessOnline ? "w" : "");
+
+        KLOG_WARNING(LOG_TAG, "%s\n", dmesgline);
     }
 
     healthd_mode_ops->battery_update(&props);
