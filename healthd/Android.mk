@@ -21,6 +21,7 @@ include $(BUILD_STATIC_LIBRARY)
 include $(CLEAR_VARS)
 LOCAL_SRC_FILES := healthd_board_msm.cpp
 LOCAL_MODULE := libhealthd.qcom
+LOCAL_C_INCLUDES := $(LOCAL_PATH)/include
 LOCAL_CFLAGS := -Werror
 include $(BUILD_STATIC_LIBRARY)
 
