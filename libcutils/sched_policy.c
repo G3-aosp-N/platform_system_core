@@ -384,7 +384,6 @@ int set_sched_policy(int tid, SchedPolicy policy)
     if (__sys_supports_schedgroups &&
         policy != SP_REALTIME) {
 /* END Motorola, IKJBXLINE-9555 */
-        int fd = -1;
         int boost_fd = -1;
         switch (policy) {
         case SP_BACKGROUND:
@@ -401,11 +400,6 @@ int set_sched_policy(int tid, SchedPolicy policy)
         default:
             boost_fd = -1;
             break;
-        }
-
-        if (fd > 0 && add_tid_to_cgroup(tid, fd) != 0) {
-            if (errno != ESRCH && errno != ENOENT)
-                return -errno;
         }
 
 #ifdef USE_SCHEDBOOST
