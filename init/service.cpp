@@ -371,12 +371,8 @@ bool Service::Start() {
             scon = ret_scon;
             free(ret_scon);
         }
-        if (rc == 0 && scon == mycon) {
+        if (rc == 0 && scon == mycon)
             ERROR("Service %s does not have a SELinux domain defined.\n", name_.c_str());
-            free(mycon);
-            free(fcon);
-            return false;
-        }
         free(mycon);
         free(fcon);
         if (rc < 0) {
@@ -729,7 +725,7 @@ Service* ServiceManager::FindServiceByKeychord(int keychord_id) const {
     return nullptr;
 }
 
-void ServiceManager::ForEachService(std::function<void(Service*)> callback) const {
+void ServiceManager::ForEachService(const std::function<void(Service*)>& callback) const {
     for (const auto& s : services_) {
         callback(s.get());
     }

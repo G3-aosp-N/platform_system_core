@@ -29,7 +29,9 @@
 #include <sys/socket.h>
 #include <sys/mount.h>
 #include <sys/resource.h>
+#ifndef NO_FINIT_MODULE
 #include <sys/syscall.h>
+#endif
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -63,24 +65,40 @@
 #include "signal_handler.h"
 #include "util.h"
 
+using android::base::StringPrintf;
+
 #define chmod DO_NOT_USE_CHMOD_USE_FCHMODAT_SYMLINK_NOFOLLOW
 #define UNMOUNT_CHECK_MS 5000
 #define UNMOUNT_CHECK_TIMES 10
 
+#ifdef NO_FINIT_MODULE
+// System call provided by bionic but not in any header file.
+extern "C" int init_module(void *, unsigned long, const char *);
+#endif
+
 static const int kTerminateServiceDelayMicroSeconds = 50000;
 
 static int insmod(const char *filename, const char *options) {
+#ifndef NO_FINIT_MODULE
     int fd = open(filename, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd == -1) {
         ERROR("insmod: open(\"%s\") failed: %s", filename, strerror(errno));
+#else
+    std::string module;
+    if (!read_file(filename, &module)) {
+#endif
         return -1;
     }
+#ifndef NO_FINIT_MODULE
     int rc = syscall(__NR_finit_module, fd, options, 0);
     if (rc == -1) {
         ERROR("finit_module for \"%s\" failed: %s", filename, strerror(errno));
     }
     close(fd);
     return rc;
+#else
+    return init_module(&module[0], module.size(), options);
+#endif
 }
 
 static int __ifupdown(const char *interface, int up) {
@@ -110,6 +128,7 @@ done:
     return ret;
 }
 
+#ifndef UMOUNT_AND_FSCK_IS_UNSAFE
 // Turn off backlight while we are performing power down cleanup activities.
 static void turnOffBacklight() {
     static const char off[] = "0";
@@ -135,6 +154,7 @@ static void turnOffBacklight() {
         android::base::WriteStringToFile(off, fileName);
     }
 }
+#endif
 
 static int wipe_data_via_recovery(const std::string& reason) {
     const std::vector<std::string> options = {"--wipe_data", std::string() + "--reason=" + reason};
@@ -148,6 +168,7 @@ static int wipe_data_via_recovery(const std::string& reason) {
 }
 
 static void unmount_and_fsck(const struct mntent *entry) {
+#ifndef UMOUNT_AND_FSCK_IS_UNSAFE
     if (strcmp(entry->mnt_type, "f2fs") && strcmp(entry->mnt_type, "ext4"))
         return;
 
@@ -222,27 +243,43 @@ static void unmount_and_fsck(const struct mntent *entry) {
         android_fork_execvp_ext(ARRAY_SIZE(ext4_argv), (char **)ext4_argv,
                                 &st, true, LOG_KLOG, true, NULL, NULL, 0);
     }
+#endif
 }
 
 static int do_class_start(const std::vector<std::string>& args) {
-        /* Starting a class does not start services
-         * which are explicitly disabled.  They must
-         * be started individually.
-         */
+    /* Starting a class does not start services
+     * which are explicitly disabled.  They must
+     * be started individually.
+     */
     ServiceManager::GetInstance().
         ForEachServiceInClass(args[1], [] (Service* s) { s->StartIfNotDisabled(); });
+
+    std::string prop_name = StringPrintf("class_start:%s", args[1].c_str());
+    if (prop_name.length() < PROP_NAME_MAX) {
+        ActionManager::GetInstance().QueueEventTrigger(prop_name);
+    }
     return 0;
 }
 
 static int do_class_stop(const std::vector<std::string>& args) {
     ServiceManager::GetInstance().
         ForEachServiceInClass(args[1], [] (Service* s) { s->Stop(); });
+
+    std::string prop_name = StringPrintf("class_stop:%s", args[1].c_str());
+    if (prop_name.length() < PROP_NAME_MAX) {
+        ActionManager::GetInstance().QueueEventTrigger(prop_name);
+    }
     return 0;
 }
 
 static int do_class_reset(const std::vector<std::string>& args) {
     ServiceManager::GetInstance().
         ForEachServiceInClass(args[1], [] (Service* s) { s->Reset(); });
+
+    std::string prop_name = StringPrintf("class_reset:%s", args[1].c_str());
+    if (prop_name.length() < PROP_NAME_MAX) {
+        ActionManager::GetInstance().QueueEventTrigger(prop_name);
+    }
     return 0;
 }
 
@@ -303,7 +340,12 @@ static int do_mkdir(const std::vector<std::string>& args) {
     /* mkdir <path> [mode] [owner] [group] */
 
     if (args.size() >= 3) {
-        mode = std::stoul(args[2], 0, 8);
+        unsigned long mode_ul;
+        if (sscanf(args[2].c_str(), "%lo", &mode_ul) != 1) {
+            ERROR("mkdir: invalid mode %s\n", args[2].c_str());
+            return -EINVAL;
+        }
+        mode = (mode_t) mode_ul;
     }
 
     ret = make_dir(args[1].c_str(), mode);
@@ -547,6 +589,7 @@ static int mount_fstab(const char* fstabfile, int mount_mode) {
     return ret;
 }
 
+
 /* Queue event based on fs_mgr return code.
  *
  * code: return code of fs_mgr_mount_all
@@ -558,6 +601,13 @@ static int mount_fstab(const char* fstabfile, int mount_mode) {
  */
 static int queue_fs_event(int code) {
     int ret = code;
+    
+    std::string bootmode = property_get("ro.bootmode");
+    if (strncmp(bootmode.c_str(), "ffbm", 4) == 0) {
+        NOTICE("ffbm mode, not start class main\n");
+        return 0;
+    }
+
     if (code == FS_MGR_MNTALL_DEV_NEEDS_ENCRYPTION) {
         ActionManager::GetInstance().QueueEventTrigger("encrypt");
     } else if (code == FS_MGR_MNTALL_DEV_MIGHT_BE_ENCRYPTED) {
@@ -700,6 +750,9 @@ static int do_powerctl(const std::vector<std::string>& args) {
     void (*callback_on_ro_remount)(const struct mntent*) = NULL;
 
     if (strncmp(command, "shutdown", 8) == 0) {
+        if (property_get_bool("init.shutdown_to_charging", false)) {
+            return android_reboot(ANDROID_RB_RESTART2, 0, "charging");
+        }
         cmd = ANDROID_RB_POWEROFF;
         len = 8;
     } else if (strncmp(command, "reboot", 6) == 0) {
@@ -810,83 +863,145 @@ static int do_verity_update_state(const std::vector<std::string>& args) {
     return fs_mgr_update_verity_state(verity_update_property);
 }
 
+static const char * get_prefix(const std::vector<std::string>& args)
+{
+    uint32_t arglen = args.size();
+    const char *prefix = NULL;
+    for (uint32_t i = 0; i < arglen - 1; i++) {
+        if (args[i].compare("-p") == 0) {
+            prefix = args[++i].c_str();
+            break;
+        }
+    }
+    return prefix;
+
+}
+static int sanitize_path(const char *path, const char *prefix)
+{
+    struct stat st;
+    char buf[PATH_MAX] = {0};
+    if (!path || !prefix) {
+        goto error;
+    }
+    //Confirm the path exists
+    if (lstat(path, &st) < 0) {
+        ERROR("sanitize_path: Failed to locate path %s: %s\n",
+                path,
+                strerror(errno));
+        goto error;
+    }
+    //If this is a symlink check that the prefix matches
+    if (S_ISLNK(st.st_mode)){
+        if (readlink(path, buf, PATH_MAX - 1) < 0) {
+            ERROR("sanitize_path: Failed to resolve link for %s: %s\n",
+                    path,
+                    strerror(errno));
+            goto error;
+        }
+        if (strncmp(buf, prefix, strlen(prefix))) {
+            ERROR("sanitize_path: Match error: Path:%s Resolved:%s Prefix%s\n",
+                    path,
+                    buf,
+                    prefix);
+            goto error;
+        }
+    }
+    return 0;
+error:
+    return -1;
+}
+
 static int do_write(const std::vector<std::string>& args) {
-    const char* path = args[1].c_str();
-    const char* value = args[2].c_str();
+    const char* path = NULL;
+    const char* value = NULL;
+    const char* prefix = NULL;
+    uint32_t arglen = args.size();
+
+    prefix = get_prefix(args);
+    if (prefix && (arglen != 5)) {
+        ERROR("do_write: Incorrect number of args\n");
+        goto error;
+    }
+    for (uint32_t i = 1; i < arglen - 1; i++) {
+        if (args[i].compare("-p") != 0) {
+            path = args[i++].c_str();
+            value = args[i].c_str();
+            break;
+        } else {
+            //Value at current index is -p. The next index would
+            //be the prefix.Skip it.
+            i++;
+        }
+    }
+    if (!path || !value) {
+        ERROR("do_write: Invalid path/value\n");
+        goto error;
+    }
+    if (prefix) {
+        if (sanitize_path(path, prefix) != 0) {
+            ERROR("do_write: Faield to sanitize path: %s prefix: %s\n",
+                            path,
+                            prefix);
+            goto error;
+        }
+        return write_file_follow(path, value);
+    }
     return write_file(path, value);
+error:
+    return -EINVAL;
 }
 
 static int do_copy(const std::vector<std::string>& args) {
-    char *buffer = NULL;
-    int rc = 0;
-    int fd1 = -1, fd2 = -1;
-    struct stat info;
-    int brtw, brtr;
-    char *p;
-
-    if (stat(args[1].c_str(), &info) < 0)
-        return -1;
-
-    if ((fd1 = open(args[1].c_str(), O_RDONLY|O_CLOEXEC)) < 0)
-        goto out_err;
-
-    if ((fd2 = open(args[2].c_str(), O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0660)) < 0)
-        goto out_err;
-
-    if (!(buffer = (char*) malloc(info.st_size)))
-        goto out_err;
-
-    p = buffer;
-    brtr = info.st_size;
-    while(brtr) {
-        rc = read(fd1, p, brtr);
-        if (rc < 0)
-            goto out_err;
-        if (rc == 0)
-            break;
-        p += rc;
-        brtr -= rc;
+    std::string data;
+    if (read_file(args[1].c_str(), &data)) {
+        return write_file(args[2].c_str(), data.c_str());
     }
-
-    p = buffer;
-    brtw = info.st_size;
-    while(brtw) {
-        rc = write(fd2, p, brtw);
-        if (rc < 0)
-            goto out_err;
-        if (rc == 0)
-            break;
-        p += rc;
-        brtw -= rc;
-    }
-
-    rc = 0;
-    goto out;
-out_err:
-    rc = -1;
-out:
-    if (buffer)
-        free(buffer);
-    if (fd1 >= 0)
-        close(fd1);
-    if (fd2 >= 0)
-        close(fd2);
-    return rc;
+    return -1;
 }
 
 static int do_chown(const std::vector<std::string>& args) {
+    const char *prefix = get_prefix(args);
+    uint32_t num_prefix_args = (!prefix) ? 0:2;
     /* GID is optional. */
-    if (args.size() == 3) {
+    if (args.size() == 3 + num_prefix_args) {
+        if (prefix) {
+            if ((sanitize_path(args[2].c_str(), prefix) != 0)) {
+                ERROR("do_chown: failed for %s..prefix(%s) match error\n",
+                        args[2].c_str(),
+                        prefix);
+                goto error;
+            }
+            //Following of symlink allowed
+            if (chown(args[2].c_str(), decode_uid(args[1].c_str()), -1) == -1)
+                return -errno;
+            return 0;
+        }
+        //Followng of symlinks not allowed
         if (lchown(args[2].c_str(), decode_uid(args[1].c_str()), -1) == -1)
             return -errno;
-    } else if (args.size() == 4) {
+    } else if (args.size() == 4 + num_prefix_args) {
+        if (prefix) {
+            if ((sanitize_path(args[3].c_str(), prefix) != 0)) {
+                ERROR("do_chown: sanitize_path failed for path: %s prefix:%s\n",
+                        args[3].c_str(),
+                        prefix);
+                goto error;
+            }
+            //Following of symlink allowed
+            if (chown(args[3].c_str(), decode_uid(args[1].c_str()),
+                        decode_uid(args[2].c_str())) == -1)
+                return -errno;
+            return 0;
+        }
         if (lchown(args[3].c_str(), decode_uid(args[1].c_str()),
-                   decode_uid(args[2].c_str())) == -1)
+                    decode_uid(args[2].c_str())) == -1)
             return -errno;
     } else {
         return -1;
     }
     return 0;
+error:
+    return -1;
 }
 
 static mode_t get_mode(const char *s) {
@@ -903,8 +1018,19 @@ static mode_t get_mode(const char *s) {
 }
 
 static int do_chmod(const std::vector<std::string>& args) {
+    const char *prefix = get_prefix(args);
+    int flags = AT_SYMLINK_NOFOLLOW;
+    if (prefix) {
+        if (sanitize_path(args[2].c_str(), prefix) != 0) {
+            ERROR("do_chmod: failed for %s..prefix(%s) match err\n",
+                    args[2].c_str(),
+                    prefix);
+            return -1;
+        }
+        flags = 0;
+    }
     mode_t mode = get_mode(args[1].c_str());
-    if (fchmodat(AT_FDCWD, args[2].c_str(), mode, AT_SYMLINK_NOFOLLOW) < 0) {
+    if (fchmodat(AT_FDCWD, args[2].c_str(), mode, flags) < 0) {
         return -errno;
     }
     return 0;
@@ -995,8 +1121,8 @@ BuiltinFunctionMap::Map& BuiltinFunctionMap::map() const {
     constexpr std::size_t kMax = std::numeric_limits<std::size_t>::max();
     static const Map builtin_functions = {
         {"bootchart_init",          {0,     0,    do_bootchart_init}},
-        {"chmod",                   {2,     2,    do_chmod}},
-        {"chown",                   {2,     3,    do_chown}},
+        {"chmod",                   {2,     4,    do_chmod}},
+        {"chown",                   {2,     5,    do_chown}},
         {"class_reset",             {1,     1,    do_class_reset}},
         {"class_start",             {1,     1,    do_class_start}},
         {"class_stop",              {1,     1,    do_class_stop}},
@@ -1034,7 +1160,7 @@ BuiltinFunctionMap::Map& BuiltinFunctionMap::map() const {
         {"verity_load_state",       {0,     0,    do_verity_load_state}},
         {"verity_update_state",     {0,     0,    do_verity_update_state}},
         {"wait",                    {1,     2,    do_wait}},
-        {"write",                   {2,     2,    do_write}},
+        {"write",                   {2,     4,    do_write}},
     };
     return builtin_functions;
 }
